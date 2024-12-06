@@ -25,7 +25,7 @@ TIME_WINDOW = 1  # Time window in seconds
 request_log = defaultdict(list)  # Dictionary to store request timestamps for each IP
 
 
-# Rate limiter function
+#this will be our function to chekc if a current ip address has hit their limit. 
 def is_rate_limited(ip):
     """Check if the IP address has exceeded the rate limit."""
     current_time = time.time()
@@ -37,7 +37,7 @@ def is_rate_limited(ip):
     return False
 
 
-# Padding and unpadding functions
+
 def pad_data(data: bytes) -> bytes:
     """Pad data to be a multiple of AES block size."""
     padder = padding.PKCS7(128).padder()  # AES block size is 128 bits = 16 bytes
@@ -48,7 +48,7 @@ def unpad_data(data: bytes) -> bytes:
     unpadder = padding.PKCS7(128).unpadder()
     return unpadder.update(data) + unpadder.finalize()
 
-# Initialize the database
+#intiail funciton to get the database setup
 def init_db():
     """Initialize the SQLite database and create the tables if they don't exist."""
     with sqlite3.connect(DB_NAME) as conn:
@@ -87,7 +87,8 @@ def init_db():
         """)
         conn.commit()
 
-# Load or generate keys
+
+#this will be called to get the public and private keys and put them into the database. 
 def load_or_generate_keys():
     """Load private and public keys from the database, or generate new ones if they don't exist."""
     encryption_key = os.environ.get('NOT_MY_KEY')
@@ -95,18 +96,19 @@ def load_or_generate_keys():
         raise ValueError("Environment variable 'NOT_MY_KEY' not set")
     encryption_key = encryption_key.encode()
 
-    with sqlite3.connect(DB_NAME) as conn:
+    with sqlite3.connect(DB_NAME) as conn:  #connect to the database
         cursor = conn.cursor()
         cursor.execute("SELECT key FROM keys WHERE exp > ?", (int(datetime.utcnow().timestamp()),))
         row = cursor.fetchone()
 
         if row:
-            encrypted_private_key = row[0]
+            encrypted_private_key = row[0]  #retrieve the private key from the database and decrypt it 
             private_key_pem = decrypt_private_key(encrypted_private_key, encryption_key)
             private_key = rsa.PrivateKey.load_pkcs1(private_key_pem)
             public_key = rsa.PublicKey(private_key.n, private_key.e)
             return private_key, public_key
         else:
+               #generate new keys and save them to the database, now we also encrypt them.
             (public_key, private_key) = rsa.newkeys(2048)
             private_key_pem = private_key.save_pkcs1()
             encrypted_private_key = encrypt_private_key(private_key_pem, encryption_key)
@@ -117,10 +119,9 @@ def load_or_generate_keys():
 
 def encrypt_private_key(private_key_pem: bytes, encryption_key: bytes) -> bytes:
     """Encrypt the private key using AES encryption."""
-    # Pad the private key before encryption
     padded_data = pad_data(private_key_pem)
 
-    # Encrypt the data
+    #use the cipher library to encrypt the keys. 
     cipher = Cipher(algorithms.AES(encryption_key), modes.ECB(), backend=default_backend())
     encryptor = cipher.encryptor()
     encrypted_data = encryptor.update(padded_data) + encryptor.finalize()
@@ -129,17 +130,16 @@ def encrypt_private_key(private_key_pem: bytes, encryption_key: bytes) -> bytes:
 
 def decrypt_private_key(encrypted_data: bytes, encryption_key: bytes) -> bytes:
     """Decrypt the encrypted private key using AES."""
-    # Create AES cipher using ECB mode
+    
     cipher = Cipher(algorithms.AES(encryption_key), modes.ECB(), backend=default_backend())
 
-    # Decrypt the data
+    #decrypt using cipher lib.
     decryptor = cipher.decryptor()
     decrypted_data = decryptor.update(encrypted_data) + decryptor.finalize()
 
-    # Unpad the decrypted data
     return unpad_data(decrypted_data)
 
-# Base64 URL encoding for JWT
+#function to base64url encode a number
 def base64url_encode(value):
     """Encodes a value to base64url."""
     return base64.urlsafe_b64encode(value.to_bytes((value.bit_length() + 7) // 8, byteorder='big')).decode('utf-8').rstrip('=')
@@ -147,7 +147,7 @@ def base64url_encode(value):
 init_db()
 private_key, public_key = load_or_generate_keys()
 
-# JWT Keys
+#define jwt's
 JWK_KEYS = {
     "keys": [
         {
@@ -176,7 +176,6 @@ def log_authentication_request(username: str, request_ip: str):
             """, (request_ip, user_id))
             conn.commit()
         else:
-            # In case the user doesn't exist in the database
             cursor.execute("""
                 INSERT INTO auth_logs (request_ip, user_id) 
                 VALUES (?, NULL)  # NULL as user_id if user is not found
@@ -184,18 +183,20 @@ def log_authentication_request(username: str, request_ip: str):
             conn.commit()
 
 
-# Auth endpoint with rate limiting
+#auth endpoint
 @app.route('/auth', methods=['POST'])
 def auth():
     client_ip = request.remote_addr
+    #first we just check if the user is allowed to make any more requests using their ip address passed to our function.
     if is_rate_limited(client_ip):
-        return jsonify({"message": "Too many requests, please try again later"}), 429
+        return jsonify({"message": "Too many requests, please try again later"}), 429 #retrun 429 if they cant do anymopre. 
 
     username = request.json.get('username')
     password = request.json.get('password')
-    expired = request.args.get('expired')
+    expired = request.args.get('expired')  #check for 'expired' query parameter
 
     if username == 'userABC' and password == 'password123':
+        #determine expiration time based on the 'expired' parameter
         expiration = datetime.utcnow() - timedelta(minutes=10) if expired == 'true' else datetime.utcnow() + timedelta(minutes=10)
         headers = {"kid": "unique-key-id"}
         token = jwt.encode({'exp': expiration}, private_key, algorithm='RS256', headers=headers)
@@ -209,12 +210,12 @@ def auth():
         return jsonify({"message": "Invalid credentials"}), 401  # 401 instead of 200 for invalid credentials
 
 
-# JWKS endpoint
+#other endpoint that returns list of keys. 
 @app.route('/.well-known/jwks.json', methods=['GET'])
 def jwks():
     return jsonify(JWK_KEYS), 200
 
-# Secure endpoint
+#endpoint to decode key
 @app.route('/secure-endpoint', methods=['GET'])
 def secure_endpoint():
     token = request.headers.get('Authorization').split()[1]
@@ -225,8 +226,8 @@ def secure_endpoint():
         return jsonify({"message": "Token has expired"}), 401
     except jwt.InvalidTokenError:
         return jsonify({"message": "Invalid token"}), 401
-
-# Register endpoint
+        
+#new register endpoint
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -240,7 +241,7 @@ def register():
     try:
         password_hash = ph.hash(password)
         with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
+            cursor = conn.cursor() #when someone registers with a usename passwords and email we will send that to db
             cursor.execute("INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)", 
                            (username, password_hash, email))
             conn.commit()
